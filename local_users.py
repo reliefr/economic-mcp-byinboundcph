@@ -245,6 +245,7 @@ class LocalUsersProvider(OAuthProvider):
 
         self._clients: dict[str, OAuthClientInformationFull] = {}
         self._transactions: dict[str, _LoginTransaction] = {}
+        self._completed: dict[str, tuple[str, float]] = {}  # txn -> (redirect, time)
         self._auth_codes: dict[str, tuple[AuthorizationCode, str]] = {}  # code -> (code, email)
         self._access_tokens: dict[str, AccessToken] = {}  # sha256(token) -> token
         self._refresh_tokens: dict[str, dict[str, Any]] = {}  # sha256(token) -> record
@@ -340,6 +341,11 @@ class LocalUsersProvider(OAuthProvider):
         self._prune_transactions()
         transaction = self._transactions.get(txn)
         if transaction is None:
+            now = time.time()
+            self._completed = {k: v for k, v in self._completed.items() if now - v[1] < 120}
+            done = self._completed.get(txn)
+            if done is not None:
+                return self._html(_render_done(self._server_name, done[0]))
             return self._html(_render_page(self._server_name, None, error="expired", txn=None), status=400)
 
         ip = self._client_ip(request)
@@ -364,7 +370,10 @@ class LocalUsersProvider(OAuthProvider):
         self._transactions.pop(txn, None)
         redirect = self._issue_code(transaction, email)
         logger.info("Login accepted for %s (client %s)", email, client_name or transaction.client.client_id)
-        return RedirectResponse(redirect, status_code=302, headers=_NO_STORE)
+        self._completed[txn] = (redirect, time.time())
+        # A page that forwards the browser (instead of a 302 on the form POST) is not blocked by
+        # browsers or password managers that interfere with cross-site redirects after a form submit.
+        return self._html(_render_done(self._server_name, redirect))
 
     def _issue_code(self, transaction: _LoginTransaction, email: str) -> str:
         params = transaction.params
@@ -491,7 +500,7 @@ class LocalUsersProvider(OAuthProvider):
 
 _NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 _SECURITY_HEADERS = {
-           "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://claude.ai https://*.claude.ai http://localhost:* http://127.0.0.1:*; frame-ancestors 'none'; base-uri 'none'",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
@@ -561,4 +570,24 @@ def _render_page(
   {where}
   {message}
   {form}
+</main></body></html>"""
+
+
+def _render_done(server_name: str, redirect: str) -> str:
+    title = html.escape(server_name)
+    url = html.escape(redirect, quote=True)
+    return f"""<!doctype html>
+<html lang="da"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="0;url={url}">
+<title>{title} – logget ind</title>
+<style>
+  body {{ font-family: -apple-system, system-ui, Segoe UI, sans-serif; background: #f5f6f8; margin: 0; display: flex; min-height: 100vh; align-items: center; justify-content: center; }}
+  main {{ background: #fff; border-radius: 12px; padding: 32px; width: 360px; box-shadow: 0 8px 30px rgba(0,0,0,.08); }}
+  h1 {{ font-size: 20px; margin: 0 0 12px; }} p {{ color: #555; font-size: 14px; }}
+  a {{ display: block; margin-top: 18px; text-align: center; padding: 11px; border-radius: 8px; background: #1a56db; color: #fff; text-decoration: none; }}
+</style></head>
+<body><main>
+  <h1>Du er logget ind</h1>
+  <p>Du sendes nu tilbage til appen. Sker der ikke noget, så klik på knappen.</p>
+  <a href="{url}">Fortsæt / Continue</a>
 </main></body></html>"""
